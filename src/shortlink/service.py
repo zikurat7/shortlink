@@ -2,7 +2,7 @@
 
 import re
 import time
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 from urllib.parse import urlsplit
 
 from . import base62
@@ -102,6 +102,10 @@ class ShortenerService:
         if link is None:
             raise NotFound(code)
         return link
+
+    def recent(self, limit: int = 50) -> List[Link]:
+        """Newest links first, with live click counts (read from storage, not the cache)."""
+        return self._storage.list_recent(limit)
 
     def _is_expired(self, link: Link) -> bool:
         return link.expires_at is not None and self._clock() >= link.expires_at

@@ -1,24 +1,55 @@
 # shortlink
 
 A URL shortener with a small web interface and a JSON API, written in plain Python
-(standard library only, Python 3.9+). Paste a long URL, get a short one back. Links can have
+(standard library only, plus `psycopg` for Postgres; Python 3.9+). Paste a long URL, get a short one back. Links can have
 custom aliases and expiry times, and every link keeps a click count.
+
+## Stack
+
+| | |
+|---|---|
+| **Language** | Python 3.9+ (the Docker image uses 3.13; CI tests 3.9 to 3.13) |
+| **Backend** | Standard library only: `http.server` (`ThreadingHTTPServer`), a JSON API with no framework |
+| **Database** | PostgreSQL 17 via psycopg 3 (Docker default); in-memory (no persistence) for quick local use |
+| **Frontend** | One HTML page served by the app, with vanilla JavaScript and CSS, no framework or build step |
+| **Core pieces** | base62 codes, an LRU cache, a token-bucket rate limiter, and a `Storage` protocol with three backends |
+| **Tooling** | setuptools (`pyproject.toml`), unittest (pytest also works), Docker and Docker Compose, GitHub Actions |
+
+The only runtime dependency is `psycopg[binary]`, and only for Postgres, as the optional `postgres` extra.
 
 ## Quick start
 
 ```
-PYTHONPATH=src python -m shortlink --port 8000 --db links.db   # or `pip install -e .` and drop PYTHONPATH
+PYTHONPATH=src python -m shortlink --port 8000   # or `pip install -e .` and drop PYTHONPATH
 ```
 
 Then open <http://localhost:8000/> in your browser.
 
-Without `--db`, links are kept in memory and lost when the server stops.
+Without `--database-url`, links are kept in memory and lost when the server stops. For persistence use
+Postgres (see Docker below).
+
+### Docker
+
+```
+docker compose up --build
+```
+
+Starts the app on <http://localhost:8000/> plus a PostgreSQL 17 container; links are stored in the
+`pgdata` volume and survive restarts (`docker compose down -v` deletes them). Set `POSTGRES_PASSWORD`
+in your environment or a `.env` file to override the default password, and change `--base-url` in
+`docker-compose.yml` when serving from a real domain. The db port is not published to the host.
+
+To use Postgres without Docker: `pip install -e '.[postgres]'` and pass `--database-url
+postgresql://user:pass@host/dbname` (or set `DATABASE_URL`).
 
 Run the tests:
 
 ```
 PYTHONPATH=src python -m unittest discover -s tests            # or just `pytest`
 ```
+
+The Postgres contract tests are skipped unless `SHORTLINK_TEST_DATABASE_URL` points at a
+**scratch** database (the tests truncate the `links` table).
 
 ## Web interface
 
@@ -55,7 +86,8 @@ curl localhost:8000/<code>/stats       # click count, expiry
 |------|---------|---------|
 | `--host` | `127.0.0.1` | address to listen on |
 | `--port` | `8000` | port to listen on |
-| `--db` | in-memory | SQLite file for persistent storage |
+| `--database-url` | `$DATABASE_URL` | PostgreSQL connection string (default: in-memory) |
+| `--base-url` | `http://HOST:PORT` | public URL used in returned short links |
 | `--rate` | `5.0` | allowed requests per second per client |
 | `--burst` | `20` | maximum burst size per client |
 
@@ -66,7 +98,7 @@ curl localhost:8000/<code>/stats       # click count, expiry
 | `base62.py` | converts integer IDs to short strings and back |
 | `cache.py` | thread-safe LRU cache with O(1) operations |
 | `ratelimit.py` | per-client token bucket rate limiter |
-| `storage.py` | `Storage` protocol with in-memory and SQLite backends |
+| `storage.py` | `Storage` protocol with in-memory and PostgreSQL backends |
 | `service.py` | validation, code generation, caching, expiry |
 | `server.py` | HTTP handlers |
 | `web.py` | the single-page web interface |
@@ -85,7 +117,7 @@ an earlier alias. `shorten` retries with the next ID on `CodeExists`
 
 **Storage behind a protocol.** `ShortenerService` only knows `next_id / add / get / record_click`.
 The same contract test suite runs against both backends (`ServiceContract` in `tests/test_service.py`),
-so adding Postgres or Redis means implementing four methods and adding a three-line test class.
+so adding Redis (or another database) means implementing four methods and adding a three-line test class.
 
 **LRU cache in front of storage** for the read-heavy path (redirects far outnumber creates).
 Clicks are written to storage on every resolve, so `stats` reads storage directly instead of the
@@ -105,8 +137,8 @@ and make expiry/deletion ineffective.
 - **Single process.** Locks protect in-process state only. Running multiple instances needs shared
   state: ID allocation from the DB (or ID ranges leased per instance), and the rate limiter in
   Redis (atomic Lua script or `INCR` + `EXPIRE`).
-- **One SQLite connection behind a lock.** Serialises all DB access. For heavier traffic, use a
-  connection pool + Postgres, with click counts moved off the hot path (buffer and batch
+- **One Postgres connection behind a lock.** Serialises all DB access. For heavier traffic, use a
+  connection pool, with click counts moved off the hot path (buffer and batch
   increments, or an event stream), since a write per redirect won't scale.
 - **Rate limiter buckets are never evicted.** Memory grows with distinct client IPs. A TTL sweep
   or an LRU bound would fix this.

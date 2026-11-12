@@ -1,9 +1,8 @@
 """Storage backends. The service depends only on the `Storage` protocol."""
 
-import sqlite3
 from dataclasses import dataclass, replace
 from threading import Lock
-from typing import Dict, Optional, Protocol
+from typing import Dict, List, Optional, Protocol
 
 
 class CodeExists(Exception):
@@ -24,6 +23,9 @@ class Storage(Protocol):
     def add(self, link: Link) -> None: ...
     def get(self, code: str) -> Optional[Link]: ...
     def record_click(self, code: str) -> None: ...
+    def list_recent(self, limit: int) -> List[Link]:
+        """Newest links first."""
+        ...
 
 
 class MemoryStorage:
@@ -53,57 +55,72 @@ class MemoryStorage:
             if link is not None:
                 self._links[code] = replace(link, clicks=link.clicks + 1)
 
+    def list_recent(self, limit: int) -> List[Link]:
+        with self._lock:
+            return list(reversed(self._links.values()))[:limit]  # dicts keep insertion order
 
-class SQLiteStorage:
-    def __init__(self, path: str = ":memory:") -> None:
-        # One shared connection guarded by a lock; fine for a single-process demo.
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+
+class PostgresStorage:
+    """PostgreSQL backend (needs `pip install shortlink[postgres]`)."""
+
+    def __init__(self, dsn: str) -> None:
+        import psycopg  # imported lazily so the stdlib-only backends need no dependencies
+
+        self._unique_violation = psycopg.errors.UniqueViolation
+        # One shared autocommit connection guarded by a lock; fine for a single-process app.
+        # Each statement is its own transaction, so a failed INSERT leaves nothing to roll back.
+        self._conn = psycopg.connect(dsn, autocommit=True)
         self._lock = Lock()
-        with self._lock, self._conn:
-            self._conn.executescript(
+        with self._lock:
+            self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS links (
                     code       TEXT PRIMARY KEY,
                     url        TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    expires_at REAL,
-                    clicks     INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS counter (
-                    id    INTEGER PRIMARY KEY CHECK (id = 1),
-                    value INTEGER NOT NULL
-                );
-                INSERT OR IGNORE INTO counter (id, value) VALUES (1, 0);
+                    created_at DOUBLE PRECISION NOT NULL,
+                    expires_at DOUBLE PRECISION,
+                    clicks     BIGINT NOT NULL DEFAULT 0
+                )
                 """
             )
+            self._conn.execute("CREATE SEQUENCE IF NOT EXISTS link_id_seq")
 
     def next_id(self) -> int:
-        with self._lock, self._conn:
-            (value,) = self._conn.execute(
-                "UPDATE counter SET value = value + 1 WHERE id = 1 RETURNING value"
-            ).fetchone()
+        with self._lock:
+            (value,) = self._conn.execute("SELECT nextval('link_id_seq')").fetchone()
             return value
 
     def add(self, link: Link) -> None:
         with self._lock:
             try:
-                with self._conn:
-                    self._conn.execute(
-                        "INSERT INTO links (code, url, created_at, expires_at, clicks)"
-                        " VALUES (?, ?, ?, ?, ?)",
-                        (link.code, link.url, link.created_at, link.expires_at, link.clicks),
-                    )
-            except sqlite3.IntegrityError:
+                self._conn.execute(
+                    "INSERT INTO links (code, url, created_at, expires_at, clicks)"
+                    " VALUES (%s, %s, %s, %s, %s)",
+                    (link.code, link.url, link.created_at, link.expires_at, link.clicks),
+                )
+            except self._unique_violation:
                 raise CodeExists(link.code) from None
 
     def get(self, code: str) -> Optional[Link]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT code, url, created_at, expires_at, clicks FROM links WHERE code = ?",
+                "SELECT code, url, created_at, expires_at, clicks FROM links WHERE code = %s",
                 (code,),
             ).fetchone()
         return Link(*row) if row else None
 
     def record_click(self, code: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute("UPDATE links SET clicks = clicks + 1 WHERE code = ?", (code,))
+        with self._lock:
+            self._conn.execute("UPDATE links SET clicks = clicks + 1 WHERE code = %s", (code,))
+
+    def list_recent(self, limit: int) -> List[Link]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT code, url, created_at, expires_at, clicks FROM links"
+                " ORDER BY created_at DESC, code LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [Link(*row) for row in rows]
+
+    def close(self) -> None:
+        self._conn.close()

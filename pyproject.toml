@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "URL shortener with a web interface and JSON API"
 requires-python = ">=3.9"
 
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -4,11 +4,13 @@ GET  /               -> 200 HTML web page
 POST /shorten        {"url": ..., "alias": ..., "ttl_seconds": ...} -> 201 JSON
 GET  /<code>         -> 302 redirect (404 unknown, 410 expired)
 GET  /<code>/stats   -> 200 JSON
+GET  /api/links      -> 200 JSON {"links": [...]}, newest first (?limit=1..200, default 50)
 """
 
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional, Type
+from urllib.parse import parse_qs, urlsplit
 
 from .ratelimit import TokenBucketLimiter
 from .service import (
@@ -23,6 +25,8 @@ from .storage import Link
 from .web import INDEX_HTML
 
 MAX_BODY_BYTES = 8 * 1024
+DEFAULT_LIST_LIMIT = 50
+MAX_LIST_LIMIT = 200
 
 
 def _link_json(link: Link, base_url: str) -> Dict[str, Any]:
@@ -69,6 +73,15 @@ def make_handler(
                 )
             return not allowed
 
+        def _list_links(self, query: str) -> None:
+            try:
+                limit = int(parse_qs(query).get("limit", [DEFAULT_LIST_LIMIT])[0])
+            except ValueError:
+                return self._error(400, "limit must be an integer")
+            limit = max(1, min(limit, MAX_LIST_LIMIT))
+            links = [_link_json(link, base_url) for link in service.recent(limit)]
+            self._send_json(200, {"links": links})
+
         # --- routes --------------------------------------------------------
         def do_POST(self) -> None:
             if self.path != "/shorten":
@@ -111,6 +124,10 @@ def make_handler(
             if self._rate_limited():
                 return
 
+            url = urlsplit(self.path)
+            if url.path == "/api/links":
+                return self._list_links(url.query)
+
             parts = self.path.strip("/").split("/")
             try:
                 if len(parts) == 1 and parts[0]:
@@ -136,8 +153,10 @@ def create_server(
     limiter: TokenBucketLimiter,
     host: str = "127.0.0.1",
     port: int = 8000,
+    base_url: Optional[str] = None,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), BaseHTTPRequestHandler)
-    base_url = f"http://{host}:{server.server_address[1]}"
-    server.RequestHandlerClass = make_handler(service, limiter, base_url)
+    if base_url is None:
+        base_url = f"http://{host}:{server.server_address[1]}"
+    server.RequestHandlerClass = make_handler(service, limiter, base_url.rstrip("/"))
     return server

@@ -55,6 +55,22 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(resp.getheader("Content-Type").startswith("text/html"))
         self.assertIn("<form", body)
 
+    def test_list_links(self):
+        resp, data = self.request("GET", "/api/links")
+        self.assertEqual((resp.status, data), (200, {"links": []}))
+
+        for i in range(3):
+            self.request("POST", "/shorten", {"url": f"https://example.com/{i}"})
+        resp, data = self.request("GET", "/api/links")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(len(data["links"]), 3)
+        self.assertEqual(data["links"][0]["url"], "https://example.com/2")  # newest first
+
+        _, data = self.request("GET", "/api/links?limit=1")
+        self.assertEqual(len(data["links"]), 1)
+        resp, _ = self.request("GET", "/api/links?limit=abc")
+        self.assertEqual(resp.status, 400)
+
     def test_error_statuses(self):
         resp, _ = self.request("POST", "/shorten", {"url": "not a url"})
         self.assertEqual(resp.status, 400)

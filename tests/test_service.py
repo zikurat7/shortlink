@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from shortlink.service import (
@@ -8,7 +9,7 @@ from shortlink.service import (
     NotFound,
     ShortenerService,
 )
-from shortlink.storage import MemoryStorage, SQLiteStorage
+from shortlink.storage import MemoryStorage, PostgresStorage
 
 
 class FakeClock:
@@ -89,15 +90,40 @@ class ServiceContract:
         for link in links:
             self.assertEqual(self.service.resolve(link.code).url, link.url)
 
+    def test_recent_lists_newest_first_and_respects_limit(self):
+        codes = []
+        for i in range(3):
+            self.clock.now += 1
+            codes.append(self.service.shorten(f"https://example.com/{i}").code)
+
+        self.assertEqual([l.code for l in self.service.recent()], codes[::-1])
+        self.assertEqual([l.code for l in self.service.recent(2)], codes[:0:-1])
+
+    def test_recent_has_live_click_counts(self):
+        link = self.service.shorten("https://example.com/a")
+        self.service.resolve(link.code)
+        self.assertEqual(self.service.recent()[0].clicks, 1)
+
+    def test_recent_on_empty_storage(self):
+        self.assertEqual(self.service.recent(), [])
+
 
 class MemoryServiceTest(ServiceContract, unittest.TestCase):
     def make_storage(self):
         return MemoryStorage()
 
 
-class SQLiteServiceTest(ServiceContract, unittest.TestCase):
+@unittest.skipUnless(
+    os.environ.get("SHORTLINK_TEST_DATABASE_URL"), "set SHORTLINK_TEST_DATABASE_URL to run"
+)
+class PostgresServiceTest(ServiceContract, unittest.TestCase):
     def make_storage(self):
-        return SQLiteStorage(":memory:")
+        storage = PostgresStorage(os.environ["SHORTLINK_TEST_DATABASE_URL"])
+        self.addCleanup(storage.close)
+        with storage._lock:  # start every test from an empty database
+            storage._conn.execute("TRUNCATE links")
+            storage._conn.execute("ALTER SEQUENCE link_id_seq RESTART")
+        return storage
 
 
 if __name__ == "__main__":

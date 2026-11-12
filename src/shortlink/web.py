@@ -8,7 +8,7 @@ INDEX_HTML = """<!doctype html>
 <title>shortlink</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
   h1 { margin-bottom: 0.25rem; }
   p.sub { margin-top: 0; opacity: 0.7; }
   form, section { display: grid; gap: 0.75rem; margin-top: 1.5rem; }
@@ -22,6 +22,12 @@ INDEX_HTML = """<!doctype html>
   .result a { word-break: break-all; }
   dl { margin: 0.5rem 0 0; display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.75rem; }
   dt { opacity: 0.7; } dd { margin: 0; word-break: break-all; }
+  ul#links { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+  ul#links li { padding: 0.6rem 0.75rem; border: 1px solid #8886; border-radius: 6px; }
+  ul#links li.expired { opacity: 0.55; }
+  ul#links .target { font-size: 0.85rem; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul#links .meta { font-size: 0.8rem; opacity: 0.7; }
+  #links-empty { opacity: 0.7; margin: 0; }
 </style>
 </head>
 <body>
@@ -51,6 +57,13 @@ INDEX_HTML = """<!doctype html>
     <button type="submit" class="secondary">Get stats</button>
   </form>
   <div id="stats" class="result" role="status"></div>
+</section>
+
+<section>
+  <h2 style="margin:0">Recent links</h2>
+  <p id="links-empty" hidden>No links yet.</p>
+  <ul id="links"></ul>
+  <div id="links-error" class="result error" role="status"></div>
 </section>
 
 <script>
@@ -92,6 +105,40 @@ function when(ts) {
   return ts ? new Date(ts * 1000).toLocaleString() : "never";
 }
 
+async function loadLinks() {
+  const errorBox = document.getElementById("links-error");
+  errorBox.style.display = "none";
+  try {
+    const {links} = await call("GET", "/api/links");
+    const list = document.getElementById("links");
+    document.getElementById("links-empty").hidden = links.length > 0;
+    list.replaceChildren(...links.map((link) => {
+      const li = document.createElement("li");
+      const expired = link.expires_at && link.expires_at * 1000 <= Date.now();
+      if (expired) li.className = "expired";
+      const a = document.createElement("a");
+      a.href = link.short_url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = link.short_url;
+      const target = document.createElement("div");
+      target.className = "target";
+      target.title = link.url;
+      target.textContent = link.url;
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = link.clicks + " clicks - created " + when(link.created_at) +
+        " - " + (expired ? "expired" : "expires " + when(link.expires_at));
+      li.append(a, target, meta);
+      return li;
+    }));
+  } catch (err) {
+    showError(errorBox, err.message);
+  }
+}
+
+loadLinks();
+
 document.getElementById("shorten").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = new FormData(e.target);
@@ -117,6 +164,7 @@ document.getElementById("shorten").addEventListener("submit", async (e) => {
       copy.textContent = "Copied";
     };
     box.append(a, copy);
+    loadLinks();
   } catch (err) {
     showError(box, err.message);
   }
