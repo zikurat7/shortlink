@@ -4,6 +4,9 @@ A URL shortener with a small web interface and a JSON API, written in plain Pyth
 (standard library only, plus `psycopg` for Postgres; Python 3.9+). Paste a long URL, get a short one back. Links can have
 custom aliases and expiry times, and every link keeps a click count.
 
+### Homepage
+![Homepage](pics/pic1.png)
+
 ## Stack
 
 | | |
